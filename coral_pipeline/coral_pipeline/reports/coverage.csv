@@ -1,8 +1,0 @@
-region,n_cells,n_dates,n_rows,date_min,date_max,lat_min,lat_max,lon_min,lon_max
-world,5642,5,28210,2024-01-01,2024-01-05,-44.775,-9.975,110.025,154.825
-africa,0,0,0,,,,,,
-asia,0,0,0,,,,,,
-australia,5539,5,27695,2024-01-01,2024-01-05,-44.775,-10.375,110.025,154.825
-europe,0,0,0,,,,,,
-northAmerica,0,0,0,,,,,,
-southAmerica,0,0,0,,,,,,
