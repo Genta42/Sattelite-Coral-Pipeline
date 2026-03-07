@@ -1,0 +1,278 @@
+from datetime import date, timedelta
+from itertools import permutations
+
+# ============================================================
+# PART 1: Finding the board game date
+# ============================================================
+print("=" * 60)
+print("PART 1: Finding the board game date")
+print("=" * 60)
+
+day_names_en = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']
+
+# Reference: Oct 26, 2025 is Sunday (confirmed)
+# All were free on that day (dinner together)
+
+# Schedule interpretation (cycles based on day-of-month starting from day 1):
+#
+# หมูหวาน (Moo Wan): free 1 day, skip 2 days
+#   → (day-1) % 3 == 0 → days 1, 4, 7, 10, 13, 16, 19, 22, 25, 28
+#   But NOT Nov 7 (temple date with Jessie)
+#
+# เจสซี่ (Jessie): free Mon, Tue, Wed, Fri, Sun (not Thu, Sat)
+#   But NOT Nov 7 (temple date with Moo Wan)
+#
+# นานิ & หมีพูห์ (Nani & Pooh): free every 4 days
+#   → (day-1) % 4 == 0 → days 1, 5, 9, 13, 17, 21, 25, 29
+#   But NOT when day-of-month is a multiple of 3
+#
+# รุ่นพี่ (Seniors): busy on days 1, 3, 8, 12, 15, 19 of the month
+#
+# คุณ (You): no constraints mentioned → always free
+
+senior_busy = {1, 3, 8, 12, 15, 19}
+
+print("\nNovember 2025 — Full availability analysis:")
+print(f"{'Date':<8} {'Day':<6} {'MooWan':<8} {'Jessie':<8} {'Nani&Pooh':<10} {'Seniors':<8} {'ALL'}")
+print("-" * 65)
+
+found_date = None
+for day in range(1, 31):
+    d = date(2025, 11, day)
+
+    # หมูหวาน: 3-day cycle, free when (day-1)%3==0, except Nov 7
+    mw = (day - 1) % 3 == 0 and d != date(2025, 11, 7)
+
+    # เจสซี่: free on Mon(0), Tue(1), Wed(2), Fri(4), Sun(6), except Nov 7
+    je = d.weekday() in [0, 1, 2, 4, 6] and d != date(2025, 11, 7)
+
+    # นานิ & หมีพูห์: 4-day cycle, free when (day-1)%4==0, but NOT multiples of 3
+    np_ = (day - 1) % 4 == 0 and day % 3 != 0
+
+    # รุ่นพี่: free if day not in busy set
+    sr = day not in senior_busy
+
+    all_free = mw and je and np_ and sr
+    marker = " <<<< ALL FREE!" if all_free else ""
+
+    print(f"Nov {day:<3} {day_names_en[d.weekday()]:<6} {str(mw):<8} {str(je):<8} {str(np_):<10} {str(sr):<8} {str(all_free)}{marker}")
+
+    if all_free and found_date is None:
+        found_date = d
+
+print(f"\n✅ ANSWER PART 1: {found_date.strftime('%A, %B %d, %Y')}")
+print(f"   วันอังคารที่ 25 พฤศจิกายน 2025")
+print(f"   - หมูหวาน: (25-1)%3=0 ✓")
+print(f"   - เจสซี่: Tuesday ✓, not Nov 7 ✓")
+print(f"   - นานิ&หมีพูห์: (25-1)%4=0 ✓, 25%3≠0 ✓")
+print(f"   - รุ่นพี่: 25 ∉ {{1,3,8,12,15,19}} ✓")
+
+
+# ============================================================
+# PART 2: Circular Seating Arrangement
+# ============================================================
+print("\n" + "=" * 60)
+print("PART 2: Circular Seating — Initial Arrangement")
+print("=" * 60)
+
+# 8 people sitting in a circle.
+# Fix "You" at position 0.
+# Positions 0–7 go clockwise (as seen from above / facing center).
+# For person at position i (facing center of the circle):
+#   left neighbor  = (i - 1) % 8   (clockwise previous)
+#   right neighbor = (i + 1) % 8   (clockwise next)
+#   opposite       = (i + 4) % 8
+
+YOU = 'คุณ'
+MW  = 'หมูหวาน'
+JE  = 'เจสซี่'
+NA  = 'นานิ'
+PO  = 'หมีพูห์'
+FK  = 'ฟ้าคราม'
+PE  = 'พีช'
+KP  = 'กอไผ่'
+
+friends = {MW, JE, NA, PO}   # same-year friends
+seniors = {FK, PE, KP}       # senior group
+couple  = {NA, PO}           # Nani & Pooh are a couple
+
+def left(i, n=8):     return (i - 1) % n
+def right(i, n=8):    return (i + 1) % n
+def opposite(i, n=8): return (i + n // 2) % n
+def adjacent(i, n=8): return {left(i, n), right(i, n)}
+
+# --- Brute-force: fix You at pos 0, try all permutations of the other 7 ---
+others = [MW, JE, NA, PO, FK, PE, KP]
+valid_arrangements = []
+
+for perm in permutations(others):
+    seat = {0: YOU}
+    for idx, person in enumerate(perm):
+        seat[idx + 1] = person
+
+    # Reverse lookup: person → position
+    pos = {v: k for k, v in seat.items()}
+
+    # Constraint 1: นานิ and หมีพูห์ sit next to each other
+    if pos[NA] not in adjacent(pos[PO]):
+        continue
+
+    # Constraint 2: หมูหวาน and เจสซี่ NOT adjacent AND NOT opposite
+    if pos[MW] in adjacent(pos[JE]):
+        continue
+    if pos[MW] == opposite(pos[JE]):
+        continue
+
+    # Constraint 3: ฟ้าคราม sits opposite someone with a partner (นานิ or หมีพูห์)
+    opp_fk = seat[opposite(pos[FK])]
+    if opp_fk not in couple:
+        continue
+
+    # Constraint 4: left of You = senior, right of You = same-year friend
+    if seat[left(0)] not in seniors:
+        continue
+    if seat[right(0)] not in friends:
+        continue
+
+    # Constraint 5: หมีพูห์ and เจสซี่ are NOT sitting beside any senior
+    po_neighbors = {seat[left(pos[PO])], seat[right(pos[PO])]}
+    if po_neighbors & seniors:
+        continue
+    je_neighbors = {seat[left(pos[JE])], seat[right(pos[JE])]}
+    if je_neighbors & seniors:
+        continue
+
+    # Constraint 6: พีช NOT opposite someone with a partner
+    opp_pe = seat[opposite(pos[PE])]
+    if opp_pe in couple:
+        continue
+
+    # Constraint 7: ฟ้าคราม NOT sitting next to You
+    if pos[FK] in adjacent(0):
+        continue
+
+    valid_arrangements.append(dict(seat))
+
+print(f"\nFound {len(valid_arrangements)} valid initial arrangement(s)\n")
+
+
+# --- Helper functions for Part 2 swaps ---
+def find_pos(seats, person):
+    """Find the position index of a person in the seats list."""
+    for i, p in enumerate(seats):
+        if p == person:
+            return i
+    return -1
+
+def swap_people(seats, p1, p2):
+    """Swap two people's seats (by name)."""
+    s = list(seats)
+    i1, i2 = find_pos(s, p1), find_pos(s, p2)
+    s[i1], s[i2] = s[i2], s[i1]
+    return s
+
+def print_seats(seats, label=""):
+    """Pretty-print the circular seating."""
+    n = len(seats)
+    if label:
+        print(f"\n{label}")
+    for i in range(n):
+        l = left(i, n)
+        r = right(i, n)
+        o = opposite(i, n)
+        print(f"  Pos {i}: {seats[i]:<10} (L={seats[l]}, R={seats[r]}, Opp={seats[o]})")
+
+
+# --- Apply swaps to each valid initial arrangement ---
+for arr_idx, seat_dict in enumerate(valid_arrangements):
+    print(f"\n{'=' * 60}")
+    print(f"ARRANGEMENT {arr_idx + 1}")
+    print(f"{'=' * 60}")
+
+    # Convert dict → list
+    seats = [seat_dict[i] for i in range(8)]
+    print_seats(seats, "Initial seating:")
+
+    # Swap 1: หมูหวาน ↔ ฟ้าคราม
+    seats = swap_people(seats, MW, FK)
+    print_seats(seats, "After swap 1 — หมูหวาน ↔ ฟ้าคราม:")
+
+    # Swap 2: คุณ ↔ พีช
+    seats = swap_people(seats, YOU, PE)
+    print_seats(seats, "After swap 2 — คุณ ↔ พีช:")
+
+    # Swap 3: เจสซี่ ↔ ฟ้าคราม
+    seats = swap_people(seats, JE, FK)
+    print_seats(seats, "After swap 3 — เจสซี่ ↔ ฟ้าคราม:")
+
+    # Swap 4: คุณ ↔ person to the right of คุณ
+    you_pos = find_pos(seats, YOU)
+    right_of_you = seats[right(you_pos)]
+    print(f"\n  [Swap 4 info: คุณ at pos {you_pos}, right neighbor = {right_of_you}]")
+    seats = swap_people(seats, YOU, right_of_you)
+    print_seats(seats, "After swap 4 — คุณ ↔ right neighbor:")
+
+    # Swap 5: นานิ ↔ หมีพูห์
+    seats = swap_people(seats, NA, PO)
+    print_seats(seats, "After swap 5 — นานิ ↔ หมีพูห์:")
+
+    # Swap 6: คุณ ↔ person to the left of ฟ้าคราม
+    fk_pos = find_pos(seats, FK)
+    left_of_fk = seats[left(fk_pos)]
+    print(f"\n  [Swap 6 info: ฟ้าคราม at pos {fk_pos}, left of FK = {left_of_fk}]")
+    seats = swap_people(seats, YOU, left_of_fk)
+    print_seats(seats, "After swap 6 — คุณ ↔ left of ฟ้าคราม:")
+
+    # Swap 7: เจสซี่ ↔ person to the right of คุณ
+    you_pos = find_pos(seats, YOU)
+    right_of_you = seats[right(you_pos)]
+    print(f"\n  [Swap 7 info: คุณ at pos {you_pos}, right of คุณ = {right_of_you}]")
+    seats = swap_people(seats, JE, right_of_you)
+    print_seats(seats, "After swap 7 — เจสซี่ ↔ right of คุณ:")
+
+    # Swap 8: ฟ้าคราม removes himself and inserts between the 2nd and 3rd
+    #         person to his right.
+    #
+    # Interpretation:
+    #   1. Identify people at +1, +2, +3 clockwise from FK.
+    #   2. Remove FK from circle (7 people remain).
+    #   3. Insert FK between the 2nd and 3rd person (after the 2nd).
+    fk_pos = find_pos(seats, FK)
+    person_1st = seats[(fk_pos + 1) % 8]
+    person_2nd = seats[(fk_pos + 2) % 8]
+    person_3rd = seats[(fk_pos + 3) % 8]
+
+    print(f"\n  [Swap 8 info: ฟ้าคราม at pos {fk_pos}]")
+    print(f"  [1st right: {person_1st}]")
+    print(f"  [2nd right: {person_2nd}]")
+    print(f"  [3rd right: {person_3rd}]")
+    print(f"  [FK inserts between {person_2nd} and {person_3rd}]")
+
+    # Step 1: Remove FK
+    new_seats = list(seats)
+    new_seats.pop(fk_pos)  # 7 people remain
+
+    # Step 2: Find where person_2nd ended up, insert FK right after
+    idx_2nd = new_seats.index(person_2nd)
+    new_seats.insert(idx_2nd + 1, FK)
+
+    seats = new_seats
+    print_seats(seats, "After swap 8 — ฟ้าคราม inserts between 2nd & 3rd to his right:")
+
+    # --- Final answer ---
+    you_pos = find_pos(seats, YOU)
+    opp_pos = opposite(you_pos)
+    print(f"\n{'─' * 40}")
+    print(f"🎯 คุณ is at position {you_pos}")
+    print(f"🎯 Opposite of คุณ (position {opp_pos}): {seats[opp_pos]}")
+    print(f"{'─' * 40}")
+
+
+# ============================================================
+# FINAL SUMMARY
+# ============================================================
+print(f"\n{'=' * 60}")
+print("FINAL ANSWERS")
+print(f"{'=' * 60}")
+print(f"Part 1: วันอังคารที่ 25 พฤศจิกายน (Tuesday, November 25)")
+print(f"Part 2: คนที่นั่งตรงข้ามคุณตอนจบ = หมูหวาน")
