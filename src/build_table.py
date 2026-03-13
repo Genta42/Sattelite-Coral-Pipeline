@@ -23,6 +23,24 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+import sys
+
+try:
+    from rich.console import Console
+    from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, MofNCompleteColumn
+    HAS_RICH = True
+except ImportError:
+    HAS_RICH = False
+
+def _should_use_rich() -> bool:
+    if not HAS_RICH or not sys.stdout.isatty():
+        return False
+    try:
+        Console(force_terminal=True).print("", end="")
+        return True
+    except (UnicodeEncodeError, OSError):
+        return False
+
 from . import config as C
 
 logger = logging.getLogger(__name__)
@@ -149,39 +167,83 @@ def build_long_table(
     schema: Optional[pa.Schema] = None
     total_rows = 0
 
-    for i, p in enumerate(sorted(cached_csvs)):
-        df = _read_cached_csv(p, var_map)
-        if df is None or df.empty:
-            continue
+    sorted_csvs = sorted(cached_csvs)
+    n_csvs = len(sorted_csvs)
 
-        df = _clean_chunk(df)
-        if df.empty:
-            continue
+    try:
+        from notify import ProgressTracker
+        ntfy_tracker = ProgressTracker("Build Table", total=n_csvs, unit="CSVs")
+    except ImportError:
+        ntfy_tracker = None
 
-        # Ensure date_utc is string for consistent parquet schema
-        df["date_utc"] = df["date_utc"].astype(str)
+    if _should_use_rich():
+        progress = Progress(
+            TextColumn("[bold green]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TextColumn("rows: {task.fields[rows]}"),
+            TimeRemainingColumn(),
+        )
+        task_id = progress.add_task("CSV", total=n_csvs, rows=0)
+        progress.start()
+    else:
+        progress = None
 
-        table = pa.Table.from_pandas(df, preserve_index=False)
+    try:
+        for i, p in enumerate(sorted_csvs):
+            df = _read_cached_csv(p, var_map)
+            if df is None or df.empty:
+                if progress is not None:
+                    progress.update(task_id, advance=1, rows=total_rows)
+                continue
 
-        if writer is None:
-            schema = table.schema
-            writer = pq.ParquetWriter(pq_path, schema)
-        else:
-            table = table.cast(schema)
+            df = _clean_chunk(df)
+            if df.empty:
+                if progress is not None:
+                    progress.update(task_id, advance=1, rows=total_rows)
+                continue
 
-        writer.write_table(table)
-        total_rows += len(df)
+            # Ensure date_utc is string for consistent parquet schema
+            df["date_utc"] = df["date_utc"].astype(str)
 
-        if (i + 1) % 50 == 0:
-            logger.info(
-                "Processed %d / %d cached files (%d rows so far)",
-                i + 1,
-                len(cached_csvs),
-                total_rows,
-            )
+            table = pa.Table.from_pandas(df, preserve_index=False)
 
-        del df, table
-        gc.collect()
+            if writer is None:
+                schema = table.schema
+                writer = pq.ParquetWriter(pq_path, schema)
+            else:
+                # Add missing columns so schema matches the first chunk
+                for field in schema:
+                    if field.name not in table.column_names:
+                        null_col = pa.nulls(len(table), type=field.type)
+                        table = table.append_column(field, null_col)
+                # Drop extra columns not in schema
+                table = table.select([f.name for f in schema])
+                table = table.cast(schema)
+
+            writer.write_table(table)
+            total_rows += len(df)
+
+            if progress is not None:
+                progress.update(task_id, advance=1, rows=total_rows)
+            elif (i + 1) % 50 == 0:
+                logger.info(
+                    "Processed %d / %d cached files (%d rows so far)",
+                    i + 1,
+                    n_csvs,
+                    total_rows,
+                )
+
+            if ntfy_tracker:
+                ntfy_tracker.update(i + 1, extra={"rows": total_rows})
+
+            del df, table
+            gc.collect()
+    finally:
+        if progress is not None:
+            progress.stop()
+        if ntfy_tracker:
+            ntfy_tracker.finish(extra={"rows": total_rows})
 
     if writer:
         writer.close()

@@ -16,9 +16,16 @@ from typing import Dict, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 import torch
 from sklearn.metrics import classification_report, confusion_matrix
 from torch.utils.data import DataLoader
+
+try:
+    from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, MofNCompleteColumn
+    HAS_RICH = True
+except ImportError:
+    HAS_RICH = False
 
 from . import config as C
 from .dataset import CoralSequenceDataset
@@ -74,6 +81,7 @@ def evaluate_model(
     seq_dir: str | Path,
     out_dir: str | Path,
     split: str = "test",
+    max_samples: int | None = None,
 ) -> Dict:
     """
     Evaluate a saved CoralLSTM checkpoint on a data split.
@@ -107,10 +115,29 @@ def evaluate_model(
     model = model.to(device)
     model.eval()
 
-    # Load split data
+    # Load split data (memory-efficient for large files)
     parquet_path = seq_dir / f"sequences_{split}.parquet"
     logger.info("Loading %s split: %s", split, parquet_path)
-    df = pd.read_parquet(parquet_path)
+    total_rows = pq.read_metadata(parquet_path).num_rows
+
+    if max_samples and total_rows > max_samples:
+        logger.info("Sampling %d / %d rows for evaluation", max_samples, total_rows)
+        stride = max(total_rows // max_samples, 1)
+        rows = []
+        pf = pq.ParquetFile(parquet_path)
+        count = 0
+        for batch in pf.iter_batches(batch_size=50_000):
+            batch_df = batch.to_pandas()
+            n_take = max(len(batch_df) // stride, 1)
+            rows.append(batch_df.sample(n=n_take, random_state=42))
+            count += n_take
+            if count >= max_samples:
+                break
+        df = pd.concat(rows, ignore_index=True).head(max_samples)
+        del rows
+    else:
+        df = pd.read_parquet(parquet_path)
+
     logger.info("Samples: %d", len(df))
 
     dataset = CoralSequenceDataset(df, norm_stats)

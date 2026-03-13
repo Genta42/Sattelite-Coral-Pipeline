@@ -93,7 +93,26 @@ def cmd_fetch(args: argparse.Namespace) -> None:
     if len(continents) > 1 and "world" in continents:
         continents.remove("world")
 
+    reef_belt = getattr(args, "reef_belt", False)
+    if reef_belt:
+        reef_lat_min, reef_lat_max = C.REEF_BELT_LAT
+        logger.info("Reef-belt filter active: clamping latitudes to (%.1f, %.1f)", reef_lat_min, reef_lat_max)
+
     for continent in continents:
+        bounds = C.CONTINENT_BOUNDS[continent]
+        lat_min, lat_max = bounds[0], bounds[1]
+
+        if reef_belt:
+            lat_min = max(lat_min, reef_lat_min)
+            lat_max = min(lat_max, reef_lat_max)
+            if lat_min >= lat_max:
+                logger.info("Skipping %s – entirely outside reef belt", continent)
+                continue
+            logger.info("  %s: lat clamped to (%.1f, %.1f)", continent, lat_min, lat_max)
+            # Temporarily override continent bounds for this fetch
+            original_bounds = C.CONTINENT_BOUNDS[continent]
+            C.CONTINENT_BOUNDS[continent] = (lat_min, lat_max, bounds[2], bounds[3])
+
         logger.info("═══ Fetching %s ═══", continent)
         paths = fetch_continent(
             continent=continent,
@@ -105,6 +124,9 @@ def cmd_fetch(args: argparse.Namespace) -> None:
             dataset_id=dataset_id,
         )
         logger.info("  → %d chunks cached for %s", len(paths), continent)
+
+        if reef_belt:
+            C.CONTINENT_BOUNDS[continent] = original_bounds
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -263,6 +285,7 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
         seq_dir=args.seq_dir,
         out_dir=args.out_dir,
         split=args.split,
+        max_samples=args.max_samples,
     )
     print(f"Accuracy: {metrics.get('accuracy', 'N/A')}")
     print(f"Macro F1: {metrics.get('macro avg', {}).get('f1-score', 'N/A')}")
@@ -324,6 +347,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     f.add_argument("--cache-dir", default="coral_pipeline/data/cache")
     f.add_argument("--dataset-id", default=None)
+    f.add_argument(
+        "--reef-belt",
+        action="store_true",
+        help="Clip latitudes to reef belt (-35 to 35) to skip polar regions",
+    )
     f.set_defaults(func=cmd_fetch)
 
     # --- build_table ---
@@ -424,6 +452,12 @@ def build_parser() -> argparse.ArgumentParser:
     ev.add_argument("--seq-dir", default="coral_pipeline/data/sequences")
     ev.add_argument("--out-dir", default="coral_pipeline/models")
     ev.add_argument("--split", default="test", choices=["train", "val", "test"])
+    ev.add_argument(
+        "--max-samples",
+        type=int,
+        default=None,
+        help="Cap evaluation samples to limit memory (e.g. 500000)",
+    )
     ev.set_defaults(func=cmd_evaluate)
 
     # --- export_model ---

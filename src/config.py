@@ -71,7 +71,7 @@ FETCH_CHUNK_DAYS = 30
 # BAA category mapping
 # ---------------------------------------------------------------------------
 BAA_MIN = 0
-BAA_MAX = 4  # CRW_BAA uses 0-4 (No Stress, Watch, Warning, Alert1, Alert2)
+BAA_MAX = 5  # CRW_BAA uses 0-5 (No Stress, Watch, Warning, Alert1, Alert2, Alert3)
 BAA_FILL_VALUE = -1  # what we write for missing/land
 
 # ---------------------------------------------------------------------------
@@ -94,14 +94,15 @@ TRAIN_DEFAULTS = {
     "patience": 10,
     "seed": 42,
 }
-NUM_CLASSES = 5
+NUM_CLASSES = 6
 SEQUENCE_FEATURES = ["baa_cat", "dhw", "hotspot"]
 STATIC_FEATURES = ["lat", "lon"]
 
 # Default temporal splits
-SPLIT_TRAIN_END = "2023-12-31"
-SPLIT_VAL_END = "2024-12-31"
-# Everything after val end → test (2025)
+# Full historical: train through 2022, val 2023, test 2024+
+SPLIT_TRAIN_END = "2022-12-31"
+SPLIT_VAL_END = "2023-12-31"
+# Everything after val end → test
 
 
 # ---------------------------------------------------------------------------

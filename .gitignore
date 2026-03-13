@@ -1,0 +1,9 @@
+# Data directories (large files)
+coral_pipeline/data/cache/
+coral_pipeline/data/processed/
+coral_pipeline/data/sequences/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo

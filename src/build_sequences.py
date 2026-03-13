@@ -26,7 +26,26 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
+
+import sys
+
+try:
+    from rich.console import Console
+    from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, MofNCompleteColumn
+    HAS_RICH = True
+except ImportError:
+    HAS_RICH = False
+
+def _should_use_rich() -> bool:
+    if not HAS_RICH or not sys.stdout.isatty():
+        return False
+    try:
+        Console(force_terminal=True).print("", end="")
+        return True
+    except (UnicodeEncodeError, OSError):
+        return False
 
 from . import config as C
 
@@ -102,61 +121,78 @@ def _build_cell_sequences(
     For one cell (already sorted by date_utc), create all valid samples.
     A sample is valid when we have *lookback* consecutive days before
     (target_date - horizon) and the target_date itself has a BAA value.
+
+    Vectorised: finds contiguous daily runs, then uses sliding windows
+    within each run — no per-sample date lookups.
     """
     cell_df = cell_df.sort_values("date_utc").reset_index(drop=True)
-    dates = pd.to_datetime(cell_df["date_utc"])
+    n = len(cell_df)
+    min_len = lookback + horizon
+    if n < min_len:
+        return []
+
+    cell_id = cell_df.iloc[0]["cell_id"]
+    lat = float(cell_df.iloc[0]["lat"])
+    lon = float(cell_df.iloc[0]["lon"])
+
+    # Timestamps as int64 days for fast diff
+    dates_ns = pd.to_datetime(cell_df["date_utc"]).values.astype("datetime64[D]").astype(np.int64)
+    day_diffs = np.diff(dates_ns)
+
+    # Feature arrays (float64)
+    feat_arrays = {}
+    for col in feature_cols:
+        arr = cell_df[col].values.astype(np.float64)
+        # Replace NaN with -1 sentinel upfront
+        np.putmask(arr, np.isnan(arr), -1.0)
+        feat_arrays[col] = arr
+
+    baa_arr = feat_arrays["baa_cat"]
+
+    # Date strings for target_date output
+    date_strs = pd.to_datetime(cell_df["date_utc"]).dt.strftime("%Y-%m-%d").values
+
+    # Find contiguous daily runs: split where diff != 1
+    breaks = np.where(day_diffs != 1)[0]  # indices where a gap occurs
+    run_starts = np.concatenate([[0], breaks + 1])
+    run_ends = np.concatenate([breaks + 1, [n]])
+
     records: List[Dict] = []
 
-    # Build a date → row-index map for O(1) lookup
-    date_to_idx = {
-        d.date() if hasattr(d, "date") else d: i for i, d in enumerate(dates)
-    }
-
-    n = len(cell_df)
-    cell_id = cell_df.iloc[0]["cell_id"]
-    lat = cell_df.iloc[0]["lat"]
-    lon = cell_df.iloc[0]["lon"]
-
-    for target_idx in range(lookback + horizon - 1, n):
-        target_date = dates.iloc[target_idx]
-        target_date_d = (
-            target_date.date() if hasattr(target_date, "date") else target_date
-        )
-
-        # The last observation we use as input is at (target_date - horizon)
-        from datetime import timedelta
-
-        input_end_date = target_date_d - timedelta(days=horizon)
-        input_start_date = input_end_date - timedelta(days=lookback - 1)
-
-        # Check all lookback dates are present
-        input_dates = [input_start_date + timedelta(days=d) for d in range(lookback)]
-        idxs = [date_to_idx.get(d) for d in input_dates]
-        if any(i is None for i in idxs):
-            continue  # gap in time series – skip this sample
-
-        # Target BAA
-        target_baa = cell_df.iloc[target_idx]["baa_cat"]
-        if pd.isna(target_baa):
+    for rs, re in zip(run_starts, run_ends):
+        run_len = re - rs
+        if run_len < min_len:
             continue
 
-        rec: Dict = {
-            "cell_id": cell_id,
-            "lat": lat,
-            "lon": lon,
-            "target_date": str(target_date_d),
-            "horizon_days": horizon,
-            "y_baa_cat": int(target_baa),
-        }
+        # Within this contiguous run, every window of (lookback + horizon) days
+        # is valid. target = input_start + lookback - 1 + horizon
+        # i.e. target offset within run: from (min_len - 1) to (run_len - 1)
+        # input window starts at: target_offset - lookback - horizon + 1
+        for t_off in range(min_len - 1, run_len):
+            target_idx = rs + t_off
+            target_baa = baa_arr[target_idx]
+            if target_baa == -1.0:
+                continue
 
-        # Feature sequences
-        for col in feature_cols:
-            seq = [cell_df.iloc[i][col] for i in idxs]
-            # Replace NaN with -1 sentinel (downstream model handles it)
-            seq = [float(v) if pd.notna(v) else -1.0 for v in seq]
-            rec[f"x_{col}_seq"] = seq
+            # Input window: lookback days ending at (target - horizon)
+            input_end_idx = rs + t_off - horizon
+            input_start_idx = input_end_idx - lookback + 1
+            # Slice [input_start_idx : input_end_idx + 1] is always valid
+            # because we're within a contiguous run of sufficient length
 
-        records.append(rec)
+            rec: Dict = {
+                "cell_id": cell_id,
+                "lat": lat,
+                "lon": lon,
+                "target_date": date_strs[target_idx],
+                "horizon_days": horizon,
+                "y_baa_cat": int(target_baa),
+            }
+
+            for col in feature_cols:
+                rec[f"x_{col}_seq"] = feat_arrays[col][input_start_idx:input_end_idx + 1].tolist()
+
+            records.append(rec)
 
     return records
 
@@ -306,38 +342,44 @@ def build_sequences_from_shards(
     te = _date.fromisoformat(C.SPLIT_TRAIN_END)
     ve = _date.fromisoformat(C.SPLIT_VAL_END)
 
-    for si, shard_path in enumerate(shard_files):
-        logger.info(
-            "Processing shard %d / %d: %s",
-            si + 1,
-            len(shard_files),
-            shard_path.name,
+    n_shards = len(shard_files)
+
+    try:
+        from notify import ProgressTracker
+        ntfy_tracker = ProgressTracker("Build Sequences", total=n_shards, unit="shards")
+    except ImportError:
+        ntfy_tracker = None
+
+    if _should_use_rich():
+        progress = Progress(
+            TextColumn("[bold cyan]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TextColumn("samples: {task.fields[samples]}"),
+            TimeRemainingColumn(),
         )
+        shard_task = progress.add_task("Shard", total=n_shards, samples=0)
+        cell_task = progress.add_task("Cells", total=0, samples=0)
+        progress.start()
+    else:
+        progress = None
 
-        df = pd.read_parquet(shard_path)
-
-        feature_cols = ["baa_cat"]
-        for optional in ["dhw", "hotspot"]:
-            if optional in df.columns:
-                feature_cols.append(optional)
-
-        records: List[Dict] = []
-        cells = df.groupby("cell_id")
-        for cid, cell_df in cells:
-            if len(cell_df) < lookback + horizon:
-                continue
-            recs = _build_cell_sequences(cell_df, lookback, horizon, feature_cols)
-            records.extend(recs)
-
-        if not records:
-            del df
-            gc.collect()
-            continue
-
-        shard_seq_df = pd.DataFrame(records)
-        shard_seq_df = _serialize_sequences(shard_seq_df, serialization, lookback)
-
-        table = pa.Table.from_pandas(shard_seq_df, preserve_index=False)
+    def _flush_records(
+        records: List[Dict],
+        serialization: str,
+        lookback: int,
+        all_writer,
+        schema,
+        split_writers: Dict,
+        split_counts: Dict,
+        te,
+        ve,
+        out_dir: Path,
+    ) -> Tuple[pq.ParquetWriter, pa.Schema]:
+        """Flush accumulated records to parquet writers; return (all_writer, schema)."""
+        batch_df = pd.DataFrame(records)
+        batch_df = _serialize_sequences(batch_df, serialization, lookback)
+        table = pa.Table.from_pandas(batch_df, preserve_index=False)
 
         if all_writer is None:
             schema = table.schema
@@ -345,36 +387,143 @@ def build_sequences_from_shards(
 
         table = table.cast(schema)
         all_writer.write_table(table)
-        total_samples += len(shard_seq_df)
 
         # Write to split files
-        dates = pd.to_datetime(shard_seq_df["target_date"]).dt.date
+        dates = pd.to_datetime(batch_df["target_date"]).dt.date
         for split_name, mask in [
             ("train", dates <= te),
             ("val", (dates > te) & (dates <= ve)),
             ("test", dates > ve),
         ]:
-            split_df = shard_seq_df[mask]
-            if split_df.empty:
+            split_chunk = batch_df[mask]
+            if split_chunk.empty:
                 continue
-            split_table = pa.Table.from_pandas(split_df, preserve_index=False)
-            split_table = split_table.cast(schema)
+            split_table = pa.Table.from_pandas(split_chunk, preserve_index=False).cast(schema)
             if split_name not in split_writers:
                 split_writers[split_name] = pq.ParquetWriter(
-                    out_dir / f"sequences_{split_name}.parquet", schema
-                )
+                    out_dir / f"sequences_{split_name}.parquet", schema)
             split_writers[split_name].write_table(split_table)
-            split_counts[split_name] += len(split_df)
+            split_counts[split_name] += len(split_chunk)
 
-        logger.info(
-            "  Shard %d: %d samples (total: %d)",
-            si + 1,
-            len(records),
-            total_samples,
-        )
+        del batch_df, table
+        return all_writer, schema
 
-        del df, records, shard_seq_df, table
-        gc.collect()
+    FLUSH_THRESHOLD = 100_000  # flush to parquet every N records
+
+    try:
+        for si, shard_path in enumerate(shard_files):
+            logger.info(
+                "Processing shard %d / %d: %s",
+                si + 1,
+                n_shards,
+                shard_path.name,
+            )
+
+            # Determine feature columns from schema
+            shard_schema = pq.read_schema(shard_path)
+            shard_col_names = set(shard_schema.names)
+            feature_cols = ["baa_cat"]
+            for optional in ["dhw", "hotspot"]:
+                if optional in shard_col_names:
+                    feature_cols.append(optional)
+            read_cols = ["cell_id", "date_utc", "lat", "lon"] + feature_cols
+
+            # Read shard in row-group batches to stay under memory limit.
+            # Windows Store Python has ~8 GB process limit, so we accumulate
+            # per-cell data from batches of row groups (~4M rows at a time).
+            pf = pq.ParquetFile(shard_path)
+            n_row_groups = pf.metadata.num_row_groups
+            RG_BATCH = 500  # ~4M rows per batch
+
+            # First pass: collect all rows per cell using batched reads
+            cell_data: Dict[str, List[pd.DataFrame]] = {}
+            for rg_start in range(0, n_row_groups, RG_BATCH):
+                rg_end = min(rg_start + RG_BATCH, n_row_groups)
+                rg_indices = list(range(rg_start, rg_end))
+                batch_table = pf.read_row_groups(rg_indices, columns=read_cols)
+                batch_df = batch_table.to_pandas()
+                del batch_table
+
+                for cid, grp in batch_df.groupby("cell_id", sort=False):
+                    if cid not in cell_data:
+                        cell_data[cid] = []
+                    cell_data[cid].append(grp)
+
+                del batch_df
+                gc.collect()
+
+            cell_names = sorted(cell_data.keys())
+            total_cells = len(cell_names)
+
+            if progress is not None:
+                progress.reset(cell_task, total=total_cells, completed=0, samples=0)
+
+            shard_samples = 0
+            records: List[Dict] = []
+
+            # Process each cell from accumulated chunks
+            for ci, cid in enumerate(cell_names):
+                chunks = cell_data.pop(cid)
+                cell_df = pd.concat(chunks, ignore_index=True) if len(chunks) > 1 else chunks[0].reset_index(drop=True)
+                del chunks
+                if len(cell_df) < lookback + horizon:
+                    if progress is not None:
+                        progress.update(cell_task, advance=1)
+                    continue
+                recs = _build_cell_sequences(cell_df, lookback, horizon, feature_cols)
+                records.extend(recs)
+                if progress is not None:
+                    progress.update(cell_task, advance=1, samples=shard_samples + len(records))
+                elif (ci + 1) % 5000 == 0:
+                    logger.info(
+                        "  Shard %d: processed %d / %d cells (%d samples)",
+                        si + 1, ci + 1, total_cells, shard_samples + len(records),
+                    )
+
+                # Flush records when threshold reached
+                if len(records) >= FLUSH_THRESHOLD:
+                    all_writer, schema = _flush_records(
+                        records, serialization, lookback,
+                        all_writer, schema, split_writers, split_counts,
+                        te, ve, out_dir,
+                    )
+                    shard_samples += len(records)
+                    total_samples += len(records)
+                    records = []
+                    gc.collect()
+
+            # Flush remaining records for this shard
+            if records:
+                all_writer, schema = _flush_records(
+                    records, serialization, lookback,
+                    all_writer, schema, split_writers, split_counts,
+                    te, ve, out_dir,
+                )
+                shard_samples += len(records)
+                total_samples += len(records)
+                records = []
+                gc.collect()
+
+            if progress is not None:
+                progress.update(shard_task, advance=1, samples=total_samples)
+            else:
+                logger.info(
+                    "  Shard %d: %d samples (total: %d)",
+                    si + 1,
+                    shard_samples,
+                    total_samples,
+                )
+
+            if ntfy_tracker:
+                ntfy_tracker.update(si + 1, extra={"samples": total_samples})
+
+            del cell_data
+            gc.collect()
+    finally:
+        if progress is not None:
+            progress.stop()
+        if ntfy_tracker:
+            ntfy_tracker.finish(extra={"samples": total_samples})
 
     if all_writer:
         all_writer.close()

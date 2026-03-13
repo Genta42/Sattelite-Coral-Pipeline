@@ -22,6 +22,35 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import aiohttp
 import pandas as pd
 
+import sys
+
+try:
+    from rich.console import Console
+    from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn, MofNCompleteColumn
+    HAS_RICH = True
+except ImportError:
+    HAS_RICH = False
+
+def _rich_usable() -> bool:
+    """Check if rich progress bars can safely render."""
+    if not HAS_RICH:
+        return False
+    if not sys.stdout.isatty():
+        return False
+    try:
+        Console(force_terminal=True).print("", end="")
+        return True
+    except (UnicodeEncodeError, OSError):
+        return False
+
+_USE_RICH = None
+
+def _should_use_rich() -> bool:
+    global _USE_RICH
+    if _USE_RICH is None:
+        _USE_RICH = _rich_usable()
+    return _USE_RICH
+
 from . import config as C
 
 logger = logging.getLogger(__name__)
@@ -284,7 +313,7 @@ async def _fetch_chunk(
                     # Write to cache atomically
                     tmp = cache_path.with_suffix(".tmp")
                     tmp.write_bytes(data)
-                    tmp.rename(cache_path)
+                    tmp.replace(cache_path)
                     logger.info("Cached %s (%d KB)", cache_path.name, len(data) // 1024)
                     return cache_path
 
@@ -347,34 +376,73 @@ async def fetch_region(
     BATCH = 30
     sem = asyncio.Semaphore(C.MAX_CONCURRENT_REQUESTS)
     paths: List[Path] = []
+    cached_count = 0
+    total = len(all_fetches)
 
-    async with aiohttp.ClientSession() as session:
-        for batch_start in range(0, len(all_fetches), BATCH):
-            batch = all_fetches[batch_start : batch_start + BATCH]
-            tasks = [
-                _fetch_chunk(
-                    session,
-                    sem,
-                    dataset_id,
-                    variables,
-                    t0,
-                    t1,
-                    lat_r,
-                    lon_r,
-                    stride,
-                    cache_dir,
-                )
-                for t0, t1, lat_r, lon_r in batch
-            ]
-            results = await asyncio.gather(*tasks)
-            paths.extend(p for p in results if p is not None)
-            done = min(batch_start + BATCH, len(all_fetches))
-            logger.info("Fetch progress: %d / %d", done, len(all_fetches))
+    try:
+        from notify import ProgressTracker
+        ntfy_tracker = ProgressTracker("Fetch", total=total, unit="chunks")
+    except ImportError:
+        ntfy_tracker = None
+
+    if _should_use_rich():
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[bold blue]{task.description}"),
+            BarColumn(bar_width=40),
+            MofNCompleteColumn(),
+            TextColumn("cached: {task.fields[cached]}"),
+            TimeRemainingColumn(),
+            console=Console(force_terminal=True),
+        )
+        task_id = progress.add_task("Fetching", total=total, cached=0)
+        progress.start()
+    else:
+        progress = None
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            for batch_start in range(0, total, BATCH):
+                batch = all_fetches[batch_start : batch_start + BATCH]
+                tasks = [
+                    _fetch_chunk(
+                        session,
+                        sem,
+                        dataset_id,
+                        variables,
+                        t0,
+                        t1,
+                        lat_r,
+                        lon_r,
+                        stride,
+                        cache_dir,
+                    )
+                    for t0, t1, lat_r, lon_r in batch
+                ]
+                results = await asyncio.gather(*tasks)
+                for p in results:
+                    if p is not None:
+                        paths.append(p)
+                        cached_count = len(paths)
+
+                done = min(batch_start + BATCH, total)
+                if progress is not None:
+                    progress.update(task_id, completed=done, cached=cached_count)
+                else:
+                    logger.info("Fetch progress: %d / %d", done, total)
+
+                if ntfy_tracker:
+                    ntfy_tracker.update(done, extra={"cached": cached_count})
+    finally:
+        if progress is not None:
+            progress.stop()
+        if ntfy_tracker:
+            ntfy_tracker.finish(extra={"cached": cached_count})
 
     logger.info(
         "Fetched %d / %d total chunks for region",
         len(paths),
-        len(all_fetches),
+        total,
     )
     return paths
 

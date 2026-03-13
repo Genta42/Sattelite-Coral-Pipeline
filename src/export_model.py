@@ -16,7 +16,7 @@ from .model import CoralLSTM
 
 logger = logging.getLogger(__name__)
 
-CLASS_LABELS = ["No Stress", "Watch", "Warning", "Alert Level 1", "Alert Level 2"]
+CLASS_LABELS = ["No Stress", "Watch", "Warning", "Alert Level 1", "Alert Level 2", "Alert Level 3"]
 
 
 def export_to_coreml(checkpoint_path: str | Path, out_path: str | Path) -> Path:

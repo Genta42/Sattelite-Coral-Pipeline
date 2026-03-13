@@ -5,7 +5,7 @@ Production-grade pipeline for downloading NOAA Coral Reef Watch Bleaching Alert 
 ## Data Source
 
 - **ERDDAP endpoint**: `https://coastwatch.pfeg.noaa.gov/erddap/griddap/NOAA_DHW`
-- **Primary target**: `CRW_BAA` (Bleaching Alert Area, categories 0–4)
+- **Primary target**: `CRW_BAA` (Bleaching Alert Area, categories 0–5)
 - **Covariates**: `CRW_DHW` (Degree Heating Weeks), `CRW_HOTSPOT`
 - **Resolution**: 5 km global, daily
 - **Available range**: 1985-04-01 → present
@@ -118,6 +118,19 @@ python cli.py build_sequences --table-path ... --lookback 30 --horizon 14
 - **horizon** controls how far ahead the target BAA is predicted
 - The sequence builder only creates a sample when all lookback days have data (no gaps) and the target day exists
 
+## Model Performance (1985–2025 Full Run, 6 Classes)
+
+| Metric | Value |
+|--------|-------|
+| Test Accuracy | 93.6% |
+| Macro F1 | 0.501 |
+| Weighted F1 | 0.940 |
+| Best Val Loss | 0.203 (epoch 28/38) |
+
+The 6-class model (BAA 0–5) achieves strong performance on "No Stress" (F1=0.979) and "Alert Level 2" (F1=0.746, 97.1% recall). Rare middle classes (Watch/Warning/Alert 1) have lower F1 due to class imbalance. Class 5 (Alert Level 3) has zero test samples in the 2024+ data, which pulls macro F1 down artificially — weighted F1 (0.940) better reflects real-world performance.
+
+See `docs/DOCUMENTATION.md` for full per-class breakdown and `docs/DEVLOG.md` for the development journey.
+
 ## Data Leakage Prevention
 
 1. **Strict temporal split**: train ≤ 2023-12-31, val = 2024, test = 2025. No future data ever leaks into training.
@@ -146,7 +159,7 @@ For variables from a **different ERDDAP dataset**, add the dataset ID to config 
 ## Known Limitations
 
 - `CRW_BAA_7D_MAX` is **not available** on CoastWatch ERDDAP; pipeline falls back to `CRW_BAA` (daily max).
-- BAA categories are 0–4 (not 0–7); the pipeline clamps to the actual range.
+- BAA categories are 0–5 (No Stress through Alert Level 3); the pipeline clamps to this range.
 - Full global fetch at 5 km for 40 years is very large (~14,000+ requests). Use stride and date subsetting for development.
 - ERDDAP may rate-limit under heavy load; the pipeline backs off automatically but full global runs can take days.
 - Dateline handling: Asia bbox extends to lon=180. ERDDAP grid ends at 179.975, so no wrap-around is needed.

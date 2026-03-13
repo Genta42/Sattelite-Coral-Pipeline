@@ -64,7 +64,7 @@ class CoralSequenceDataset(Dataset):
 
     x_seq:    (lookback, n_seq_features) float tensor
     x_static: (n_static_features,) float tensor
-    y:        scalar long tensor (BAA class 0–4)
+    y:        scalar long tensor (BAA class 0–5)
     """
 
     def __init__(
