@@ -1,4 +1,4 @@
-# Data directories (large files)
+# Data directories (large files stored on D: drive)
 coral_pipeline/data/cache/
 coral_pipeline/data/processed/
 coral_pipeline/data/sequences/
@@ -7,3 +7,12 @@ coral_pipeline/data/sequences/
 __pycache__/
 *.pyc
 *.pyo
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
